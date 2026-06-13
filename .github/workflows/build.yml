@@ -45,29 +45,43 @@ jobs:
             npx expo prebuild --platform ios
           fi
 
-          # 4. Locate the .xcodeproj file (might be in an 'ios' folder now)
+          # 4. Locate the .xcodeproj or .xcworkspace file
+          WORKSPACE=$(find . -name "*.xcworkspace" -maxdepth 2 | head -n 1)
           XCODEPROJ=$(find . -name "*.xcodeproj" -maxdepth 2 | head -n 1)
-          if [ -z "$XCODEPROJ" ]; then
-            echo "Error: Could not find .xcodeproj file."
+          
+          if [ -n "$WORKSPACE" ]; then
+            echo "Xcode workspace found: $WORKSPACE"
+            BUILD_TARGET="-workspace $WORKSPACE"
+            SCHEME=$(xcodebuild -list -workspace "$WORKSPACE" | awk '/Schemes:/ {found=1; next} found {print; exit}' | xargs)
+          elif [ -n "$XCODEPROJ" ]; then
+            echo "Xcode project found: $XCODEPROJ"
+            BUILD_TARGET="-project $XCODEPROJ"
+            SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | awk '/Schemes:/ {found=1; next} found {print; exit}' | xargs)
+          else
+            echo "Error: Could not find .xcodeproj or .xcworkspace file."
             exit 1
           fi
-          echo "Xcode project found: $XCODEPROJ"
 
-          # 5. Identify the Scheme
-          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | grep "Schemes:" -A 2 | tail -1 | xargs)
+          # Fallback for scheme if detection fails
+          if [ -z "$SCHEME" ]; then
+            SCHEME=$(basename "$XCODEPROJ" .xcodeproj)
+          fi
           echo "Build Scheme: $SCHEME"
 
           # 6. Build Archive
-          xcodebuild -project "$XCODEPROJ" -scheme "$SCHEME" -configuration Release -archivePath MyApp.xcarchive archive -allowProvisioningUpdates -sdk iphoneos
+          xcodebuild $BUILD_TARGET -scheme "$SCHEME" -configuration Release -archivePath MyApp.xcarchive archive -allowProvisioningUpdates -sdk iphoneos
 
           # 7. Package into IPA (Simple Unsigned)
           mkdir -p Payload
-          if [ -d "MyApp.xcarchive/Products/Applications" ]; then
-            cp -r MyApp.xcarchive/Products/Applications/*.app Payload/
+          # Search for the .app bundle in the archive
+          APP_PATH=$(find MyApp.xcarchive/Products/Applications -name "*.app" | head -n 1)
+          if [ -n "$APP_PATH" ]; then
+            cp -r "$APP_PATH" Payload/
             zip -r MyApp.ipa Payload
             mv MyApp.ipa ../../
           else
             echo "Error: Build failed to produce an .app bundle."
+            find MyApp.xcarchive -maxdepth 4
             exit 1
           fi
           
