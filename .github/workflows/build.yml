@@ -30,18 +30,46 @@ jobs:
 
       - name: Build IPA (Ad-Hoc/Unsigned)
         run: |
-          # Download the source from the artifact path or use the uploaded zip
-          # The backend pushes the zip to the root of the repo
-          unzip ${{ github.event.client_payload.filename }}
+          # 1. Unzip the project
+          unzip ${{ github.event.client_payload.filename }} -d extracted_source
           
-          # This is a simplified build command. 
-          # In a real scenario, you might need to handle schemas and configurations.
-          xcodebuild -project *.xcodeproj -scheme $(xcodebuild -list -project *.xcodeproj | grep "Schemes:" -A 2 | tail -1 | xargs) -archivePath MyApp.xcarchive archive
-          
-          # Export to IPA
+          # 2. Find the project root (where package.json or *.xcodeproj is)
+          PROJECT_ROOT=$(find extracted_source -name "package.json" -o -name "*.xcodeproj" | head -n 1 | xargs dirname)
+          cd "$PROJECT_ROOT"
+          echo "Project root identified at: $PROJECT_ROOT"
+
+          # 3. Handle Expo/React Native projects
+          if [ -f "package.json" ] && grep -q "\"expo\"" package.json; then
+            echo "Expo project detected. Running prebuild..."
+            npm install
+            npx expo prebuild --platform ios
+          fi
+
+          # 4. Locate the .xcodeproj file (might be in an 'ios' folder now)
+          XCODEPROJ=$(find . -name "*.xcodeproj" -maxdepth 2 | head -n 1)
+          if [ -z "$XCODEPROJ" ]; then
+            echo "Error: Could not find .xcodeproj file."
+            exit 1
+          fi
+          echo "Xcode project found: $XCODEPROJ"
+
+          # 5. Identify the Scheme
+          SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | grep "Schemes:" -A 2 | tail -1 | xargs)
+          echo "Build Scheme: $SCHEME"
+
+          # 6. Build Archive
+          xcodebuild -project "$XCODEPROJ" -scheme "$SCHEME" -configuration Release -archivePath MyApp.xcarchive archive -allowProvisioningUpdates -sdk iphoneos
+
+          # 7. Package into IPA (Simple Unsigned)
           mkdir -p Payload
-          cp -r MyApp.xcarchive/Products/Applications/*.app Payload/
-          zip -r MyApp.ipa Payload
+          if [ -d "MyApp.xcarchive/Products/Applications" ]; then
+            cp -r MyApp.xcarchive/Products/Applications/*.app Payload/
+            zip -r MyApp.ipa Payload
+            mv MyApp.ipa ../../
+          else
+            echo "Error: Build failed to produce an .app bundle."
+            exit 1
+          fi
           
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
