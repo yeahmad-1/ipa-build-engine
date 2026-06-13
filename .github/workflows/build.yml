@@ -4,6 +4,11 @@ on:
   repository_dispatch:
     types: [build_ipa]
   workflow_dispatch:
+    inputs:
+      project_name:
+        description: 'Name of the project'
+        required: true
+        default: 'MyApp'
 
 jobs:
   build:
@@ -12,37 +17,34 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Unzip Project
-        run: |
-          ZIP_FILE=$(ls *.zip | head -n 1)
-          unzip $ZIP_FILE
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@v1
         with:
-          node-version: 18
+          xcode-version: latest-stable
 
       - name: Install dependencies
         run: |
-          cd OfflineMusicApp
-          npm install
+          if [ -f "Podfile" ]; then
+            pod install
+          fi
 
-      - name: Setup Expo
-        uses: expo/expo-github-action@v8
-        with:
-          expo-version: latest
-          eas-version: latest
-          token: ${{ secrets.EXPO_TOKEN }}
-
-      - name: Install Turtle & Build
+      - name: Build IPA (Ad-Hoc/Unsigned)
         run: |
-          cd OfflineMusicApp
-          npm install -g turtle-cli
-          expo export --public-url https://google.com
-          turtle build:ios --type simulator --export-dir ./out
-
+          # Download the source from the artifact path or use the uploaded zip
+          # The backend pushes the zip to the root of the repo
+          unzip ${{ github.event.client_payload.filename }}
+          
+          # This is a simplified build command. 
+          # In a real scenario, you might need to handle schemas and configurations.
+          xcodebuild -project *.xcodeproj -scheme $(xcodebuild -list -project *.xcodeproj | grep "Schemes:" -A 2 | tail -1 | xargs) -archivePath MyApp.xcarchive archive
+          
+          # Export to IPA
+          mkdir -p Payload
+          cp -r MyApp.xcarchive/Products/Applications/*.app Payload/
+          zip -r MyApp.ipa Payload
+          
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v3
         with:
           name: app-ipa
-          path: OfflineMusicApp/out/*.tar.gz
+          path: MyApp.ipa
