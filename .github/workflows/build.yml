@@ -1,0 +1,42 @@
+name: Build IPA
+
+on:
+  repository_dispatch:
+    types: [build_ipa]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Unzip Project
+        run: unzip project.zip
+
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install dependencies
+        run: |
+          if [ -f "Podfile" ]; then
+            pod install
+          fi
+
+      - name: Build IPA
+        run: |
+          PROJECT=$(ls -d *.xcodeproj 2>/dev/null | head -n 1)
+          SCHEME=$(xcodebuild -list -project "$PROJECT" | grep "Schemes:" -A 2 | tail -1 | xargs)
+          xcodebuild -project "$PROJECT" -scheme "$SCHEME" -archivePath MyApp.xcarchive archive
+          mkdir -p Payload
+          cp -r MyApp.xcarchive/Products/Applications/*.app Payload/
+          zip -r MyApp.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: app-ipa
+          path: MyApp.ipa
