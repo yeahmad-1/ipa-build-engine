@@ -34,51 +34,72 @@ jobs:
           unzip ${{ github.event.client_payload.filename }} -d extracted_source
           
           # 2. Find the project root (where package.json or *.xcodeproj is)
+          # We look for the deepest directory that contains either, to avoid picking the wrong one if there are nested structures
           PROJECT_ROOT=$(find extracted_source -name "package.json" -o -name "*.xcodeproj" | head -n 1 | xargs dirname)
           cd "$PROJECT_ROOT"
-          echo "Project root identified at: $PROJECT_ROOT"
+          echo "Project root identified at: $(pwd)"
 
           # 3. Handle Expo/React Native projects
           if [ -f "package.json" ] && grep -q "\"expo\"" package.json; then
             echo "Expo project detected. Running prebuild..."
             npm install
-            npx expo prebuild --platform ios
+            npx expo prebuild --platform ios --no-install
           fi
 
-          # 4. Locate the .xcodeproj or .xcworkspace file
-          WORKSPACE=$(find . -name "*.xcworkspace" -maxdepth 2 | head -n 1)
-          XCODEPROJ=$(find . -name "*.xcodeproj" -maxdepth 2 | head -n 1)
+          # 4. Handle CocoaPods (Standard RN or Native)
+          if [ -f "ios/Podfile" ]; then
+            echo "Podfile found in ios directory. Installing pods..."
+            cd ios && pod install && cd ..
+          elif [ -f "Podfile" ]; then
+            echo "Podfile found in root. Installing pods..."
+            pod install
+          fi
+
+          # 5. Locate the .xcodeproj or .xcworkspace file
+          WORKSPACE=$(find . -name "*.xcworkspace" -maxdepth 3 | head -n 1)
+          XCODEPROJ=$(find . -name "*.xcodeproj" -maxdepth 3 | head -n 1)
           
           if [ -n "$WORKSPACE" ]; then
             echo "Xcode workspace found: $WORKSPACE"
             BUILD_TARGET="-workspace $WORKSPACE"
-            SCHEME=$(xcodebuild -list -workspace "$WORKSPACE" | awk '/Schemes:/ {found=1; next} found {print; exit}' | xargs)
+            # Try to get scheme using JSON output for better reliability
+            SCHEME=$(xcodebuild -list -workspace "$WORKSPACE" -json | jq -r '.workspace.schemes[0]' | xargs)
           elif [ -n "$XCODEPROJ" ]; then
             echo "Xcode project found: $XCODEPROJ"
             BUILD_TARGET="-project $XCODEPROJ"
-            SCHEME=$(xcodebuild -list -project "$XCODEPROJ" | awk '/Schemes:/ {found=1; next} found {print; exit}' | xargs)
+            SCHEME=$(xcodebuild -list -project "$XCODEPROJ" -json | jq -r '.project.schemes[0]' | xargs)
           else
             echo "Error: Could not find .xcodeproj or .xcworkspace file."
+            ls -R
             exit 1
           fi
 
-          # Fallback for scheme if detection fails
-          if [ -z "$SCHEME" ]; then
+          # Fallback for scheme if detection fails or returns "null" (jq)
+          if [ -z "$SCHEME" ] || [ "$SCHEME" = "null" ]; then
             SCHEME=$(basename "$XCODEPROJ" .xcodeproj)
           fi
           echo "Build Scheme: $SCHEME"
 
           # 6. Build Archive
-          xcodebuild $BUILD_TARGET -scheme "$SCHEME" -configuration Release -archivePath MyApp.xcarchive archive -allowProvisioningUpdates -sdk iphoneos
+          # Using -allowProvisioningUpdates and setting CODE_SIGNING_ALLOWED=NO for unsigned build
+          xcodebuild $BUILD_TARGET -scheme "$SCHEME" -configuration Release -archivePath MyApp.xcarchive archive \
+            -allowProvisioningUpdates \
+            -sdk iphoneos \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
+            CODE_SIGNING_INJECT_BASE_ENTITLEMENTS=NO
 
           # 7. Package into IPA (Simple Unsigned)
           mkdir -p Payload
           # Search for the .app bundle in the archive
           APP_PATH=$(find MyApp.xcarchive/Products/Applications -name "*.app" | head -n 1)
           if [ -n "$APP_PATH" ]; then
+            echo "Found .app bundle at: $APP_PATH"
             cp -r "$APP_PATH" Payload/
             zip -r MyApp.ipa Payload
-            mv MyApp.ipa ../../
+            # Move to the root of the runner workspace
+            mv MyApp.ipa $GITHUB_WORKSPACE/
           else
             echo "Error: Build failed to produce an .app bundle."
             find MyApp.xcarchive -maxdepth 4
